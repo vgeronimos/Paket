@@ -891,38 +891,47 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
             | Some group -> group.Resolution
             | None -> failwithf "Error for %s: Group %O can't be found in paket.lock file." referencesFile.FileName groupName
 
-        match referencesFile.Groups |> Map.tryFind groupName with
-        | Some g ->
-            for p in g.NugetPackages do
-                let k = groupName,p.Name
-                let package =
-                    match resolution |> Map.tryFind p.Name with
-                    | Some p -> p
-                    | None -> failwithf "Error for %s: Package %O was not found in group %O of the paket.lock file." referencesFile.FileName p.Name groupName
+        let excludes =
+            match referencesFile.Groups |> Map.tryFind groupName with
+            | Some g ->
+                let excludes =
+                    g.NugetPackages
+                    |> List.collect (fun p -> p.Settings.Excludes)
+                    |> Seq.map PackageName
+                    |> Set.ofSeq
 
-                match package.Kind with
-                | ResolvedPackageKind.DotnetCliTool ->
-                    cliTools := Set.add package !cliTools
-                | ResolvedPackageKind.Package ->
-                    let restore =
-                        match targetProfileOpt with
-                        | None -> true
-                        | Some targetProfile ->
-                            match p.Settings.FrameworkRestrictions with
-                            | Requirements.ExplicitRestriction restrictions ->
-                                Requirements.isTargetMatchingRestrictions(restrictions, targetProfile)
-                            | _ -> true
+                for p in g.NugetPackages do
+                    let k = groupName,p.Name
+                    let package =
+                        match resolution |> Map.tryFind p.Name with
+                        | Some p -> p
+                        | None -> failwithf "Error for %s: Package %O was not found in group %O of the paket.lock file." referencesFile.FileName p.Name groupName
 
-                    if not restore then () else
-                    if usedPackageKeys.Contains k then
-                        failwithf "Package %O is referenced more than once in %s within group %O." p.Name referencesFile.FileName groupName
+                    match package.Kind with
+                    | ResolvedPackageKind.DotnetCliTool ->
+                        cliTools := Set.add package !cliTools
+                    | ResolvedPackageKind.Package ->
+                        let restore =
+                            match targetProfileOpt with
+                            | None -> true
+                            | Some targetProfile ->
+                                match p.Settings.FrameworkRestrictions with
+                                | Requirements.ExplicitRestriction restrictions ->
+                                    Requirements.isTargetMatchingRestrictions(restrictions, targetProfile)
+                                | _ -> true
 
-                    usedPackageKeys.Add k |> ignore
+                        if not restore then () else
+                        if usedPackageKeys.Contains k then
+                            failwithf "Package %O is referenced more than once in %s within group %O." p.Name referencesFile.FileName groupName
 
-                    let deps = this.GetDirectDependenciesOfSafe(groupName,p.Name,referencesFile.FileName)
+                        usedPackageKeys.Add k |> ignore
 
-                    toVisit := Set.add (k,p,deps) !toVisit
-        | None -> ()
+                        let deps = this.GetDirectDependenciesOfSafe(groupName,p.Name,referencesFile.FileName)
+
+                        toVisit := Set.add (k,p,deps) !toVisit
+
+                excludes
+            | None -> Set.empty
 
         let visited = Dictionary<_,_>()
 
@@ -931,21 +940,24 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
             toVisit := Set.remove current !toVisit
 
             let visitKey,p,deps = current
+            let groupName,packageName = visitKey
+            let isExcluded = excludes.Contains(packageName)
             if visited.ContainsKey(visitKey) then ()
+            elif isExcluded then
+                visited.Add(visitKey,(p,HashSet(), isExcluded))
             else
-            visited.Add(visitKey,(p,HashSet(deps)))
+                visited.Add(visitKey,(p,HashSet(deps), isExcluded))
 
-            let groupName,_packageName = visitKey
-            for dep in deps do
-                let deps = this.GetDirectDependenciesOfSafe(groupName,dep,referencesFile.FileName)
-                let packagageSettings = { p with Settings = { p.Settings with Aliases = Map.empty }}
-                toVisit := Set.add ((groupName,dep),packagageSettings,deps) !toVisit
+                for dep in deps do
+                    let deps = this.GetDirectDependenciesOfSafe(groupName,dep,referencesFile.FileName)
+                    let packagageSettings = { p with Settings = { p.Settings with Aliases = Map.empty }}
+                    toVisit := Set.add ((groupName,dep),packagageSettings,deps) !toVisit
 
         let emitted = HashSet<_>()
         [while visited.Count > 0 do
             let current =
                 visited |> Seq.minBy (fun item ->
-                    let _,deps = item.Value;
+                    let _,deps, _ = item.Value;
                     (deps.Count,item.Key))
 
             let groupName,packageName = current.Key
@@ -955,14 +967,15 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
             for item in visited do
                 let itemGroup, _ = item.Key
                 if itemGroup = groupName then
-                    let _, itemDeps = item.Value
+                    let _, itemDeps, _ = item.Value
                     itemDeps.Remove(packageName) |> ignore
                 else ()
 
             if emitted.Add current.Key then
-                let settings,dependencies = current.Value
+                let settings,dependencies,isExcluded = current.Value
                 let deps = Set.ofSeq dependencies
-                yield (current.Key,settings,deps)
+                if not isExcluded then
+                    yield (current.Key,settings,deps)
         ], !cliTools
 
     member this.GetOrderedPackageHull(groupName,referencesFile:ReferencesFile) =
@@ -1041,5 +1054,3 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
             let groupName,packageName = kv.Key
             groupName, packageName, kv.Value.Version
         ) |> Seq.toList
-
-

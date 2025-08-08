@@ -435,28 +435,21 @@ let createProjectReferencesFiles (lockFile:LockFile) (projectFile:ProjectFile) (
         for kv in groups do
             let hull,_ = lockFile.GetOrderedPackageHull(kv.Key,referencesFile,Some targetProfile)
 
-            let excludes,allDirectPackages =
+            let allDirectPackages =
                 match referencesFile.Groups |> Map.tryFind kv.Key with
                 | Some g ->
-                    let excludes =
-                        g.NugetPackages
-                        |> List.collect (fun p -> p.Settings.Excludes)
-                        |> Seq.map PackageName
-                        |> Set.ofSeq
-
                     let packages =
                         g.NugetPackages
                         |> List.map (fun p -> p.Name)
                         |> Set.ofList
-                    excludes,packages
-                | None -> Set.empty,Set.empty
+                    packages
+                | None -> Set.empty
 
             for key,packageSettings,_ in hull do
                 let resolvedPackage = resolved.Force().[key]
                 let _,packageName = key
                 let restore =
                     packageName <> PackageName "Microsoft.Azure.WebJobs.Script.ExtensionsMetadataGenerator" && // #3345
-                     not (excludes.Contains resolvedPackage.Name) &&
                      not (ImplicitPackages.Contains resolvedPackage.Name) &&
                         match resolvedPackage.Settings.FrameworkRestrictions with
                         | Requirements.ExplicitRestriction restrictions ->
